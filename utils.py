@@ -157,9 +157,10 @@ def post_process(pred_mask, norm_size):
             # region index with their corresponding distance
             if len(idx_maxarea) == 0:
                 dst_candid = [dst_list[i] for i in idx_maxarea_candid]
+                idx_best = idx_maxarea_candid[np.argmin(dst_candid)]
             else:    
                 dst_candid = [dst_list[i] for i in idx_maxarea]
-            idx_best = idx_maxarea[np.argmin(dst_candid)]
+                idx_best = idx_maxarea[np.argmin(dst_candid)]
 
         pred_mask[labeled_img != idx_best+1] = 0
         pred_mask = scipy.ndimage.binary_fill_holes(pred_mask)
