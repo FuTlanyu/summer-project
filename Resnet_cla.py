@@ -179,6 +179,6 @@ def ResNet50():
     return ResNet(Bottleneck_origin, [3, 4, 6, 3])
 
 # print('Resnet18')
-print(pms.summary(ResNet18(), torch.zeros((10, 3, 256, 256)), show_input=True, show_hierarchical=False))
+# print(pms.summary(ResNet18(), torch.zeros((10, 3, 256, 256)), show_input=True, show_hierarchical=False))
 # print('\nResnet50')
 # print(pms.summary(ResNet50(), torch.zeros((10, 3, 256, 256)), show_input=True, show_hierarchical=False))
