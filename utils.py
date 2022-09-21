@@ -1,18 +1,34 @@
+from cProfile import label
 import os
+import subprocess
 import random
+import shutil
+from PIL import Image
+from skimage.measure import label, regionprops
+import scipy
 
-from os.path import join
+from os.path import join, split
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap   
+from matplotlib.pyplot import cm, Normalize 
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
+import torchvision.transforms as transforms
 import torch.nn.functional as F
 from torchvision.transforms import functional as TF
-
-from torch.utils.data import Dataset
+from torch import optim
+from torch.utils.data import Dataset, DataLoader
+from sklearn.utils import shuffle
+from sklearn.model_selection import KFold
+import time
+import re
 import h5py
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, roc_curve, auc, accuracy_score, f1_score
+from torchsummary import summary
 
 ### AF SLO CLASSIFICATION ###
 CLA_DATA_OLD_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\SLO_AF_classifier\Oxford'
@@ -22,21 +38,49 @@ CLA_MODEL_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summ
 CLA_H5_FILE_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\SLO_AF_classifier\hdf5'
 
 
-### AF CLASSIFICATION ###
+### AF SEGMENTATION ###
 SEG_DATA_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\region_of_interest\data_raw"
 RPGR_PATH = join(SEG_DATA_PATH, 'RPGR')
 USH_PATH = join(SEG_DATA_PATH, 'USH')
 
 SEG_H5_FILE_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\region_of_interest\hdf5"
-SEG_MODEL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\code\model"
+SEG_MODEL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\code\model\local"
 SEG_VISUAL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\code\visual"
 
 
 ### AF SLO MTL ###
+MTL_MODEL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\MTL\model"
+MTL_VISUAL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\MTL\visual"
+
+NORM_SIZE_CLA = 256
+
+def data_extract(indices, x_all, y_all):
+    xs = []
+    ys = []
+    for index in indices:
+        xs.append(x_all[index])
+        ys.append(y_all[index])
+    
+    return xs, ys
+
+# def data_split(indice, image_all, mask_all):
+#     imgs = []
+#     masks = []
+#     for id in indice:
+#         imgs.append(image_all[id])
+#         masks.append(mask_all[id])
+#     return imgs, masks
 
 
+def stat_compute_log(stat_list, str_type, folds=5):
+    stat_avg = np.mean(stat_list)
+    stat_std = np.std(stat_list)
 
+    stat_list = [round(num,4) for num in stat_list]
+    print(f'{folds}-fold {str_type}: ', stat_list)
+    print('%d-fold %s mean and std: %.4f \u00B1 %.4f' % (folds, str_type, stat_avg, stat_std))
 
+    return stat_avg, stat_std
 
 
 
@@ -44,84 +88,189 @@ SEG_VISUAL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Sum
 '''
 AF Segmentation helper functions
 '''
-def load_imgs_seg(data_paths, data_type, transform=True):
-    """transform images or masks into an array of images with uniform image size
+
+# inputs(1,3,768,768) outputs(1,3,768,768)
+def patch_infer_output(model, inputs, norm_size, device):
+    stride = 128
+    psize = 256
+    gsize = (norm_size-psize)//stride+1
+    
+    outputs = torch.zeros((1,2,norm_size,norm_size)).to(device)
+    count = torch.zeros((norm_size, norm_size)).to(device)
+    for i in range(gsize):
+        for j in range(gsize):
+            x_begin = i*stride
+            x_end = x_begin + psize
+            y_begin = j*stride
+            y_end = y_begin + psize
+
+            patch = TF.crop(inputs, x_begin, y_begin, psize, psize)
+            poutput = model(patch)
+            outputs[...,x_begin:x_end,y_begin:y_end] += poutput 
+            count[x_begin:x_end,y_begin:y_end] += 1
+
+    outputs = torch.div(outputs, count)
+    return outputs
+
+
+def clahe_apply(image):
+    clipLimit = 2.0
+    gridsize = 8
+    clahe = cv2.createCLAHE(clipLimit=clipLimit,tileGridSize=(gridsize,gridsize))
+    g,b,r = cv2.split(image)
+    g = clahe.apply(g)
+    b = clahe.apply(b)
+    r = clahe.apply(r)
+    img_clahe = cv2.merge((g,b,r))
+
+    return img_clahe
+
+
+
+def post_process(pred_mask, norm_size):
+    labeled_img = label(pred_mask, connectivity=2) 
+    regions = regionprops(labeled_img) # not include background
+    num_region = len(regions)
+    if num_region == 0: 
+        pass
+    else:
+        # the distance between region centroid and image center
+        dst_list = []
+        area_list = []
+        for region in regions:
+            re_cen = np.array(region.centroid)
+            img_cen = np.array([norm_size/2,norm_size/2])
+            dst = np.linalg.norm(re_cen-img_cen)
+            dst_list.append(dst)
+            area_list.append(region.area)
+        
+        if num_region < 3:
+            idx_best = np.argmin(dst_list)
+        else:
+            # indices of 3 max areas
+            idx_maxarea_candid = np.argpartition(area_list, -3)[-3:]
+            idx_maxarea = []
+            for i in idx_maxarea_candid:
+                if area_list[i] > 100:
+                    idx_maxarea.append(i)
+            
+            # region index with their corresponding distance
+            if len(idx_maxarea) == 0:
+                dst_candid = [dst_list[i] for i in idx_maxarea_candid]
+            else:    
+                dst_candid = [dst_list[i] for i in idx_maxarea]
+            idx_best = idx_maxarea[np.argmin(dst_candid)]
+
+        pred_mask[labeled_img != idx_best+1] = 0
+        pred_mask = scipy.ndimage.binary_fill_holes(pred_mask)
+    
+    return pred_mask
+
+def load_imgs_seg(data_paths, data_type, norm_size, clahe_bool):
+    """Crop and downsample images
 
     Args:
         data_paths: data paths 
         data_type: data type
-        transform: transform data or not. Defaults to True.
+        clahe_bool: CLAHE enhancement or not
 
     Returns:
         uniform size data
     """
-    # img_paths = list(img_paths)
+    assert data_type == 'image' or 'mask', 'No such data type'
     images = []
-
     for img_path in data_paths:
         img = cv2.imread(img_path)
+
         if data_type == 'mask':
-            img = img/255
+            # make mask values {0,255}
+            _, img = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+            img = img//255
+
+        # crop and resize image to the same size
+        x, y, _ = img.shape
+        length = min(x, y)
         
-        if transform:
-            # TODO padding and resize image to the same size
-            norm_size = 256
-            x, y, _ = img.shape
-            if x > y:
-                img = cv2.copyMakeBorder(img, 0, 0, 0, x-y, cv2.BORDER_CONSTANT, None, value = 0)
-            if x < y:
-                img = cv2.copyMakeBorder(img, 0, y-x, 0, 0, cv2.BORDER_CONSTANT, None, value = 0)
-            assert img.shape[0] == img.shape[1]
-            if img.shape[0] != norm_size:
-                img = cv2.resize(img, (norm_size, norm_size))
+        if x != y:
+            img = img[:length, :length]
+        
+        if clahe_bool and data_type == 'image':
+            img = clahe_apply(img)
+
+        if img.shape[0] != norm_size:
+            img = cv2.resize(img, (norm_size, norm_size))
+    
+        # img = img.astype(np.uint8)
+        images.append(np.array(img))
+
+    return np.array(images)
+
+
+
+def load_imgs_cla(img_paths):
+    """Crop/downsample and load image data into an array of images 
+
+    Args:
+        img_paths: image paths
+
+    Returns:
+        an array of images
+    """
+    images = []
+    for img_path in img_paths:
+        img = cv2.imread(img_path)
+        # crop and resize image to the same size
+        x, y, _ = img.shape
+        if x != y:
+            length = min(x, y)
+            img = img[:length, :length]
+        if img.shape[0] != NORM_SIZE_CLA:
+            img = cv2.resize(img, (NORM_SIZE_CLA, NORM_SIZE_CLA))
         
         images.append(np.array(img))
 
-    return np.array(images, dtype='uint8')
+    return np.array(images)
 
 
-
-def image_restore_seg(imgs, size_origin):
-    """Restore the image to original image size (upsample, crop)
+def image_restore_seg(img, size_origin):
+    """Restore a single mask: upsample and add all black if original mask is not square
 
     Args:
-        img: numpy array
+        imgs: downsampled mask predictions
+        size_origin: original mask size
     """
-    if torch.is_tensor(imgs):
-        imgs = imgs.cpu().detach().numpy()
-    batch_len, x, y = size_origin
-    imgs_origin = []
-    for i in range(batch_len):
-        length = max(x, y)
-        img = cv2.resize(np.array(imgs[i], dtype=np.uint8), (length, length))
-        if x < y:
-            img = img[:x,:]
-        if x > y:
-            img = img[:,:y]
-        imgs_origin.append(img)
-    
-    return np.array(imgs_origin)
+    if torch.is_tensor(img):
+        img = img.cpu().detach().numpy()
+    x, y = size_origin
+    length = min(x, y)
+    img = cv2.resize(np.array(img, dtype=np.uint8), (length, length))
+    if x != y:
+        assert x>y
+        img = cv2.copyMakeBorder(img, 0, x-y, 0, 0, cv2.BORDER_CONSTANT, None, value = 0)
+
+    return img
 
 
 
-def create_h5_train_seg(imgs, masks, type):
+def create_h5_train_seg(imgs, masks, type, norm_size, clahe):
     """Create the hdf5 file for each subset containing images and masks
 
     Args:
         imgs: a list of train image paths
         masks: a list of train mask paths
     """
-    trans = True
-    imgs_arr = load_imgs_seg(imgs, 'image', transform=trans)
-    masks_arr = load_imgs_seg(masks, 'mask', transform=trans)
+    imgs_arr = load_imgs_seg(imgs, 'image', norm_size, clahe)
+    masks_arr = load_imgs_seg(masks, 'mask', norm_size, clahe)
 
     h5_file_name = join(SEG_H5_FILE_PATH, f'{type}.h5')
+    if os.path.exists(h5_file_name): os.remove(h5_file_name)
+
     with h5py.File(h5_file_name, 'w') as f:
         f.create_dataset(name='imgs', data=imgs_arr)
         f.create_dataset(name='masks', data=masks_arr)
 
 
-def create_h5_test_seg(imgs, masks, type):
+def create_h5_test_seg(imgs, masks, type, norm_size, clahe, fid=None):
     """Create the hdf5 file for each subset
 
     Args:
@@ -130,61 +279,63 @@ def create_h5_test_seg(imgs, masks, type):
         type: 'val' or 'test'
     """
     # save the resized images and masks
-    imgs_arr = load_imgs_seg(imgs, 'image')
-    masks_arr = load_imgs_seg(masks, 'mask')
+    imgs_arr = load_imgs_seg(imgs, 'image', norm_size, clahe)
+    masks_arr = load_imgs_seg(masks, 'mask', norm_size, clahe)
 
-    # name_list = []
-    h5_file_name = join(SEG_H5_FILE_PATH, f'{type}.h5')
+    if type == 'val':
+        h5_file_name = join(SEG_H5_FILE_PATH, 'val.h5')
+        if os.path.exists(h5_file_name): os.remove(h5_file_name)
+    elif type == 'test':
+        h5_file_name = join(SEG_H5_FILE_PATH, f'test{fid}.h5')
+
     with h5py.File(h5_file_name, 'w') as f:
         for i, (img, mask) in enumerate(zip(imgs, masks)):
             img_name = os.path.split(img)[-1].split('.')[0]
             mask_name = os.path.split(mask)[-1].split('.')[0]
             assert img_name == mask_name, "image and mask don't match"
-            
-            mask_origin = cv2.imread(mask)/255
+
+            # test
+            # if img_name == '1564100_OD_2016':
+            #     print(img_name)
+            #     xxx = cv2.imread(mask)
+            #     _, xxx = cv2.threshold(xxx, 127, 255, cv2.THRESH_BINARY)
+            #     xxx = xxx//255*255
+                
+            #     cv2.imshow('xxx', xxx)
+            #     print()
+
+            mask_origin = cv2.imread(mask)
+            _, mask_origin = cv2.threshold(mask_origin, 127, 255, cv2.THRESH_BINARY)
+            mask_origin = mask_origin//255
             img_trans = imgs_arr[i]
             mask_trans = masks_arr[i]
         
             f.create_dataset(name=img_name, data=np.array([img_trans, mask_trans]))
             f.create_dataset(name=img_name+'_origin', data=np.array(mask_origin, dtype='uint8'))
-            # name_list.append(mask_name)
-    # print(f'name list for {type} before creating hdf5: {name_list}')
-
-
-# def display_image(imgs, filename):
-#     if type(imgs) != np.ndarray:
-#         imgs = imgs.cpu().detach().numpy()
-#     img = np.repeat(imgs[0][:, :, np.newaxis], 3, axis=2).astype('uint8')*255
-#     plt.imsave(join(VISUAL_PATH, filename), img)
-
-
-# def display_images(imgs, filename):
-#     if type(imgs) != np.ndarray:
-#         imgs = imgs.cpu().detach().numpy()
-#     num = imgs.shape[0]
-#     fig, axs = plt.subplots(1, num)
-#     for i in range(num):
-#         img = np.repeat(imgs[i][:, :, np.newaxis], 3, axis=2)*255
-#         axs[i].imshow(img)
-#         axs[i].axis('off')
-#     plt.savefig(join(VISUAL_PATH, filename))
 
 
 
-def seg_visual(pred_mask_ds, pred_mask_res, var_map, miou_ds, miou_res, img_name, fig_name, uncertainty_analysis=False):
-    """Display image, ground truth, downsampled predicted mask, restored predicted mask, uncertainty map 
+
+ 
+def seg_visual(pred_mask_restore, var_map, miou_restore, img_name, fig_name, model_type):
+    """Display image, ground truth, restored predicted mask, uncertainty map 
 
     Args:
-        pred_mask: predicted mask
+        pred_mask_restore: restored predicted mask
+        var_map: uncertainty map
+        miou_restore: mIoU score of the restored mask
         img_name: image filename
+        fig_name: saved filename
     """
-    if type(pred_mask_ds) != np.ndarray:
-        pred_mask_ds = pred_mask_ds.cpu().detach().numpy()
-    if type(pred_mask_res) != np.ndarray:
-        pred_mask_res = pred_mask_res.cpu().detach().numpy()
+    assert model_type == 'mtl' or 'seg'
+    if type(pred_mask_restore) != np.ndarray:
+        pred_mask_restore = pred_mask_restore.cpu().detach().numpy()
     
-    fig, axs = plt.subplots(1, 5)
-    
+    if var_map is None:
+        fig, axs = plt.subplots(1, 3)
+    else:
+        fig, axs = plt.subplots(1, 4)
+
     if 'RPGR' in img_name:
         img_path = join(RPGR_PATH, img_name+'.tif')
         gt_path = join(RPGR_PATH, img_name+'.jpg')
@@ -194,63 +345,139 @@ def seg_visual(pred_mask_ds, pred_mask_res, var_map, miou_ds, miou_res, img_name
     
     img = plt.imread(img_path)
     gt = plt.imread(gt_path)
-    pred_mask_ds = np.repeat(pred_mask_ds[:, :, np.newaxis], 3, axis=2)*255
-    pred_mask_res = np.repeat(pred_mask_res[:, :, np.newaxis], 3, axis=2)*255
+    pred_mask_restore = np.repeat(pred_mask_restore[:, :, np.newaxis], 3, axis=2)*255
     
     axs[0].imshow(img)    
     axs[0].axis('off')
     
     axs[1].imshow(gt)
-    axs[1].set_title('Ground truth')
+    axs[1].set_title('Ground truth mask')
     axs[1].axis('off')
     
-    axs[2].imshow(pred_mask_ds)
-    axs[2].set_title('Downsampled \n (mIoU=%.3f)' % miou_ds)
+    axs[2].imshow(pred_mask_restore)
+    axs[2].set_title('Predicted mask \n (mIoU=%.3f)' % miou_restore)
     axs[2].axis('off')
-    
-    axs[3].imshow(pred_mask_res)
-    axs[3].set_title('Restored \n (mIoU=%.3f)' % miou_res)
-    axs[3].axis('off')
 
-    if uncertainty_analysis:
-        assert var_map is not None
-        axs[4].imshow(var_map, cmap='Greys')
-        axs[4].set_title('Uncertainty \n map')
-        axs[4].axis('off')
+    if var_map is not None:
+        axs[3].imshow(var_map, cmap='Greys')
+        axs[3].set_title('Uncertainty \n map')
+        axs[3].axis('off')
 
     plt.tight_layout()
-    plt.savefig(join(SEG_VISUAL_PATH, fig_name))  
+    if model_type == 'mtl':
+        plt.savefig(join(MTL_VISUAL_PATH, fig_name))  
+    else:
+        plt.savefig(join(SEG_VISUAL_PATH, fig_name))
     plt.close()
 
+    # # test
+    # save_dir_path = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\visual_demo'
+  
+    # shutil.copy(img_path, save_dir_path) 
+    # if var_map is not None:
+    #     cv2.normalize(var_map, var_map, 0, 255, cv2.NORM_MINMAX)
+    #     var_map = np.repeat(var_map[:, :, np.newaxis], 3, axis=2)
+    #     cv2.imwrite(join(save_dir_path, img_name+'_probmap.png'), var_map)
 
-def mIoU_score(preds, targets, num_classes=2):
-    """Compute the sum of the mIoU scores of a batch of data
+
+
+# All images are of size (256, 256, 3)
+def seg_visual_overlap(norm_size, gt_mask, pred_mask, var_map, img_name, fig_name, model_type):
+    """Display downsampled image, ground truth (boundary), 
+               restored predicted mask (boundary), uncertainty map (heatmap) in a same image 
 
     Args:
-        preds: _description_
-        targets: _description_
+        pred_mask_restore: restored predicted mask
+        var_map: uncertainty map
+        miou_restore: mIoU score of the restored mask
+        img_name: image filename
+        fig_name: saved filename
+    """
+    assert model_type == 'mtl' or 'seg'
+    
+    # read original image
+    if 'RPGR' in img_name:
+        img_path = join(RPGR_PATH, img_name+'.tif')
+    else:
+        img_path = join(USH_PATH, img_name+'.tif')
+    image = cv2.imread(img_path)
+    
+    x, y, _ = image.shape
+    if x != y:
+        length = min(x, y)
+        image = image[:length, :length]
+
+    if image.shape[0] != norm_size:
+        image = cv2.resize(image, (norm_size, norm_size))
+
+    if type(gt_mask) != np.ndarray:
+        gt_mask = gt_mask.cpu().detach().numpy() # (512,512)
+    if type(pred_mask) != np.ndarray:
+        pred_mask = pred_mask.cpu().detach().numpy() # (512,512)
+    gt_mask = np.repeat(gt_mask[:, :, np.newaxis], 3, axis=2).astype('uint8')*255
+    pred_mask = np.repeat(pred_mask[:, :, np.newaxis], 3, axis=2).astype('uint8')*255
+    
+    cmap = cm.YlOrBr
+    c_cmap = cmap(np.arange(cmap.N))
+    c_cmap[:, -1] = np.linspace(0, 1, cmap.N)
+    c_cmap = ListedColormap(c_cmap)
+
+    if var_map is not None:
+        norm = Normalize(vmin=var_map.min(), vmax=var_map.max())
+        var_heatmap = c_cmap(norm(var_map))
+
+        # Blend image with heatmap
+        var_heatmap = cv2.cvtColor(np.uint8(var_heatmap * 255), cv2.COLOR_RGBA2BGRA)
+        alpha = var_heatmap[..., 3] / 255
+        alpha = np.tile(np.expand_dims(alpha, axis=2), [1, 1, 3])
+        image = (image * (1 - alpha) + var_heatmap[..., :3] * alpha).astype(np.uint8)
+
+
+    gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_BGR2GRAY)
+    pred_mask = cv2.cvtColor(pred_mask, cv2.COLOR_BGR2GRAY)
+
+    gt_contours, _ = cv2.findContours(gt_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+    pred_contours, _ = cv2.findContours(pred_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+
+    cv2.drawContours(image, gt_contours, -1, (0,255,0), thickness=1, lineType=cv2.LINE_AA)
+    # # test
+    # if img_name == '1564100_OD_2016':
+    #     cv2.imshow('gtmask', image)
+
+    cv2.drawContours(image, pred_contours, -1, (0,0,255), thickness=1, lineType=cv2.LINE_AA)
+    if model_type == 'mtl':
+        cv2.imwrite(join(MTL_VISUAL_PATH, 'overlap_' + fig_name), image)
+    else:
+        cv2.imwrite(join(SEG_VISUAL_PATH, 'overlap_' + fig_name), image)
+
+    # # test
+    # save_dir_path = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\visual_demo'
+    # cv2.imwrite(join(save_dir_path, img_name+'_pred.png'), image)
+
+
+def mIoU_score(pred, target, num_classes=2):
+    """Compute the mIoU scores of mask pair
+
+    Args:
+        pred: _description_
+        target: _description_
         num_classes: _description_. Defaults to 2.
 
     Returns:
-        _description_
+        mIoU value
     """
-    if type(preds) != np.ndarray:
-        preds = preds.cpu().detach().numpy()
-    if type(targets) != np.ndarray:
-        targets = targets.cpu().detach().numpy()
-    batch_len = len(targets)
-    mIoUs = np.empty(batch_len)
-    for i in range(batch_len):
-        pred = preds[i]
-        target = targets[i]
-        inter1 = np.sum(np.multiply(pred, target))
-        inter0 = np.sum(np.multiply(1-pred, 1-target))
-        iou1 = inter1 / (np.sum(pred) + np.sum(target) - inter1 + 1e-8)
-        iou0 = inter0 / (np.sum(1-pred) + np.sum(1-target) - inter0 + 1e-8)
-        miou = (iou1+iou0) / 2
-        mIoUs[i] = miou
+    if type(pred) != np.ndarray:
+        pred = pred.cpu().detach().numpy()
+    if type(target) != np.ndarray:
+        target = target.cpu().detach().numpy()
+    
+    inter1 = np.sum(np.multiply(pred, target))
+    inter0 = np.sum(np.multiply(1-pred, 1-target))
+    iou1 = inter1 / (np.sum(pred) + np.sum(target) - inter1 + 1e-8)
+    iou0 = inter0 / (np.sum(1-pred) + np.sum(1-target) - inter0 + 1e-8)
+    miou = (iou1+iou0) / 2
 
-    return np.sum(mIoUs)
+    return miou
 
 
 def apply_dropout(m):
@@ -323,39 +550,25 @@ class MTLLoss(nn.Module):
         
         return dice_loss+seg_bce+cla_bce 
 
+
+
+
 '''
 AF/SLO Classification helper functions
 '''
-# transform image data into an array of images 
-# image shape (1024, 1024, 3)
-def load_imgs_cla(img_paths):
-    images = []
-    for img_path in img_paths:
-        img = cv2.imread(img_path)
-        # crop and resize image to the same size
-        norm_size = 256
-        x, y, _ = img.shape
-        if x != y:
-            length = min(x, y)
-            img = img[:length, :length]
-        if img.shape[0] != norm_size:
-            img = cv2.resize(img, (norm_size, norm_size))
-        
-        images.append(np.array(img))
 
-    return np.array(images)
 
 # def load_img(img_path):
 
 #     img = cv2.imread(img_path)
 #     # crop and resize image to the same size
-#     norm_size = 768
+#     NORM_SIZE = 768
 #     x, y, _ = img.shape
 #     if x != y:
 #         length = min(x, y)
 #         img = img[:length, :length]
-#     if img.shape[0] != norm_size:
-#         img = cv2.resize(img, (norm_size, norm_size))
+#     if img.shape[0] != NORM_SIZE:
+#         img = cv2.resize(img, (NORM_SIZE, NORM_SIZE))
     
 #     return np.array(img)
 
@@ -368,7 +581,7 @@ def display_imgs_cla(imgs):
     plt.savefig('img_display.png')
 
 
-def create_h5_cla(imgs, labels, type):
+def create_h5_cla(imgs, labels, type, fid=None):
     """Create the hdf5 file for each subset containing images and labels
 
     Args:
@@ -379,9 +592,60 @@ def create_h5_cla(imgs, labels, type):
     assert type == 'train' or 'val' or 'test', 'Unrecognizable dataset type'
     imgs_arr = load_imgs_cla(imgs)
     labels_arr = np.array(labels)
+    if type == 'test':
+        h5_file_name = join(CLA_H5_FILE_PATH, f'{type}{fid}.h5')
+    else:
+        h5_file_name = join(CLA_H5_FILE_PATH, f'{type}.h5')
+        if os.path.exists(h5_file_name): os.remove(h5_file_name)
 
-    h5_file_name = join(CLA_H5_FILE_PATH, f'{type}.h5')
     with h5py.File(h5_file_name, 'w') as f:
         f.create_dataset(name='imgs', data=imgs_arr)
         f.create_dataset(name='labels', data=labels_arr)
 
+
+def change_state_keys(state_dict, type):
+    assert type == 'seg' or 'cla'
+    old_keys = list(state_dict.keys())
+    for old_key in old_keys:
+        if type == 'seg':
+            rexpr = r'conv_block\1_1'
+        else:
+            rexpr = r'conv_block\1_2'
+        new_key = re.sub(r'^conv_block(\d)', rexpr, old_key)
+        state_dict[new_key] = state_dict.pop(old_key)
+
+    return state_dict
+
+
+def roc_plot(fpr, tpr, auc, fid):
+    plt.figure()
+    lw = 2
+    plt.plot(fpr, tpr, color="darkorange", lw=lw, label="ROC curve (area = %0.2f)" % auc)
+    plt.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC curve for SLO AF classification")
+    plt.legend(loc="lower right")
+    plt.savefig(join(CLA_MODEL_PATH, f'roc_curve_fold{fid+1}.png'))
+
+
+def roc_plot_all(fprs, tprs, auc_mean, auc_std, type):
+    # fpr_mean = np.mean(fprs, axis=0)
+    # tpr_mean = np.mean(tprs, axis=0)
+
+    plt.figure()
+    
+    # all curves
+    fair_color_list = ["coral", "gold", "yellowgreen", "turquoise", "darkorchid"]
+    for i in range(5):
+        plt.plot(fprs[i], tprs[i], color=fair_color_list[i], lw=1, label=f"fold {i+1}")
+    plt.plot([0, 1], [0, 1], color="lightgray", lw=2, linestyle="--")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC curves for all folds (AUC = %0.4f \u00B1 %0.4f)" % (auc_mean, auc_std))
+    plt.legend(loc="lower right")
+    plt.savefig(join(SEG_MODEL_PATH, f'{type}_ROC_curves_all.png'))
