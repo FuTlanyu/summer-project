@@ -27,6 +27,13 @@
 
 ### Cross-stitch Network for FAF image segmentation (Multi-task learning)
 `mtl_model.py`: adapted cross-stitch network accepting two different image sources as input.<br>
+`mtl_train.py` `mtl_test.py`: training and test. Some settings in `mtl_train.py`: <br>
+- `p_same` `p_diff`: float between 0 and 1, initial cross-stitch unit weights.
+- `compute_wcs`: bool, recording cross-stitch unit weights during training or not.
+- `cs_diff_lr`: bool, adopting a different learning rate for cross-stitch unit weights or not.
+- `CS_LR_RATIO`: learning rate for cross-stitch unit weights.
+- `pretrain_load`: bool, loading pre-trained model weights for segmentation and classification sub-networks or not.
+- `PRE_SEG_EPOCH` `PRE_CLA_EPOCH`: pre-training epochs for segmentation and classification respectively.
 
 
 
