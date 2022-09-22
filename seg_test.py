@@ -4,6 +4,7 @@ from UNet import UNet
 from dataset import AFDataset
 from seg_train_train_test_cv import seg_inference, seg_inference_roc
 
+
 if __name__ == '__main__':
 
     BATCHSIZE_TE = 1
