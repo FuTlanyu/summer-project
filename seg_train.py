@@ -3,7 +3,6 @@ from utils import *
 from SegNet import SegNet
 from UNet import UNet
 from dataset import AFDataset
-import pickle
 
 
 def seg_inference(post_process_bool, thresh, model, criterion, dataloader, norm_size, num_batch, kid, bayes_bool, num_runs_bayes, device, infer_type, last_epoch=False):
@@ -68,19 +67,22 @@ def seg_inference(post_process_bool, thresh, model, criterion, dataloader, norm_
 
                 y_gt_all.append(targets[0].cpu().detach().numpy())
 
+                if torch.is_tensor(preds[0]):
+                    preded = preds[0].cpu().detach().numpy()
+                else: preded = preds[0]
                 # post process
                 if post_process_bool and infer_type == 'test' :
-                    preds[0] = post_process(preds[0], norm_size)
+                    preded = post_process(preded, norm_size)
 
                 # restore to original mask image size then compute miou 
-                pred_restore = image_restore_seg(preds[0], targets_origins[0].shape)
+                pred_restore = image_restore_seg(preded, targets_origins[0].shape)
                 # mscore_ds = mIoU_score(preds, targets)
                 mscore = mIoU_score(pred_restore, targets_origins[0])
 
                 if infer_type == 'test' or last_epoch:
                     img_visual_name = 'fold%d_%s_pred%d_miou%.3f_%s.png'%(kid+1,infer_type,batch_idx+1,mscore,filenames[0])
                     seg_visual(pred_restore, var_maps[0], mscore, filenames[0], img_visual_name, 'seg')
-                    seg_visual_overlap(norm_size, targets[0], preds[0], var_maps[0], filenames[0], img_visual_name, 'seg')
+                    seg_visual_overlap(norm_size, targets[0], preded, var_maps[0], filenames[0], img_visual_name, 'seg')
                 
                 # mIoU_sum_val_ds += mscore_ds
                 mIoU_sum += mscore
@@ -107,23 +109,15 @@ One epoch of inference, store all the preds, compute roc curve, compute pred map
 def seg_inference_roc(post_process_bool, model, criterion, dataloader, norm_size, num_batch, kid, bayes_bool, num_runs_bayes, device, infer_type, last_epoch=False):
     assert infer_type == 'test' or 'val', 'No inference type'
     loss_infer = 0
-    
     y_prob_all = [] # (N,512,512)
     y_prob_var_all = [] # (N,2,512,512)
     y_gt_all = [] # (N,512,512)
     targets_origin_all = []
     filename_all = []
     with torch.no_grad():
-        # with tqdm(dataloader, unit="batch") as vepoch:
         # if patch based: inputs(1,3,768,768) targets(1,768,768) targets_origins(1,origin size)
         for batch_idx, (inputs, targets, targets_origins, filenames) in enumerate(dataloader):
-            # if infer_type == 'test':
-            #     vepoch.set_description(f"Test Model {kid+1}")
-            # else:
-            #     vepoch.set_description(f"Valid Epoch {epoch+1}")
-            
             inputs, targets = inputs.to(device), targets.to(device)
-            
             if bayes_bool:
                 # model uncertainty analysis
                 loss_bayes_total = []
@@ -160,8 +154,6 @@ def seg_inference_roc(post_process_bool, model, criterion, dataloader, norm_size
             targets_origin_all.append(targets_origins[0].detach().numpy())
             filename_all.append(filenames[0])
 
-            # vepoch.set_postfix(loss=loss_infer/(batch_idx+1))
-
     y_prob_all = np.array(y_prob_all)
     y_gt_all = np.array(y_gt_all)
     fpr, tpr, threshs = roc_curve(y_gt_all.reshape(-1), y_prob_all.reshape(-1))
@@ -170,16 +162,6 @@ def seg_inference_roc(post_process_bool, model, criterion, dataloader, norm_size
     id = np.argmax(gmeans)
     thresh_opt = threshs[id]
     y_pred_all = np.where(y_prob_all<thresh_opt, 0, 1) # (N,512,512)
-
-    # ### Threshold test
-    # if last_epoch:
-    #     data = {}
-    #     data['thresh_opt'] = thresh_opt
-    #     data['y_prob_all'] = y_prob_all
-    #     data['y_gt_all'] = y_gt_all
-    #     with open(f'fold{kid}_prob.pkl', 'wb') as f:
-    #         pickle.dump(data, f)
-
 
     mIoU_sum = 0
     uncertainty_sum = 0
@@ -262,22 +244,21 @@ if __name__ == '__main__':
     model_type ='segnet'
 
     BATCHSIZE_TR = 1
-    EPOCH = 2
+    EPOCH = 1
 
-    thresh_auto = True
-    thresh_value = 0.5
+    thresh_auto = False
+    thresh_value = 0.002
     
     NORM_SIZE = 512
-    aug_train_bool = False
+    aug_train_bool = True
     # ['crop_stride', 'rotate', 'flip']
-    aug_list = ['crop_stride', 'rotate', 'flip']
-    clahe_bool = False
+    aug_list = ['flip']
+    clahe_bool = True
     post_process_bool = True
 
-    bayes_bool = False # turn on dropout or not
+    bayes_bool = True # turn on dropout or not
     dropout = 0.2      # dropout rate
-    dropout_state = (True, False, False)  # turn on which layers
-    # uncertain_ana = False 
+    dropout_state = (False, False, True)  # turn on which layers
     num_runs_bayes = 20
     
 
@@ -324,12 +305,9 @@ if __name__ == '__main__':
 
         trainset = AFDataset('train', augmentation=aug_train_bool, aug_list=aug_list)
         valset = AFDataset('val', augmentation=False)
-        # testset = AFDataset('test', augmentation=False)
 
         trainloader = DataLoader(trainset, batch_size=BATCHSIZE_TR, shuffle=True, num_workers=0)
         validloader = DataLoader(valset, batch_size=BATCHSIZE_TE, shuffle=False, num_workers=0)
-        # testloader = DataLoader(testset, batch_size=BATCHSIZE_TE, shuffle=False, num_workers=0)
-
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if torch.cuda.is_available():
@@ -341,8 +319,6 @@ if __name__ == '__main__':
         elif model_type == 'segnet':
             segmodel = SegNet(bayes_bool, dropout, dropout_state).to(device)
         
-
-        # print(pms.summary(net, torch.zeros((BATCHSIZE, 3, 256, 256)).to(device), show_input=True, show_hierarchical=False))
         if loss_type == 'wce':
             weights = torch.tensor([1.0, 18.0]).to(device)
             criterion = nn.CrossEntropyLoss(weight=weights)
@@ -359,7 +335,6 @@ if __name__ == '__main__':
         num_batch_train = len(trainloader)
         num_batch_val = len(validloader)
         # num_batch_test = len(testloader)
-
 
         print('\nTraining...')
         # save the train/valid loss/metric downsampled valid metric for every epoch 
