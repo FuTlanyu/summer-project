@@ -19,7 +19,11 @@
 - clahe_bool: bool, CLAHE image enhancement or not.
 - post_process_bool: bool, post-processing for predicted results or not.
 - bayes_bool: bool, enabling dropout layers in the SegNet model to implement uncertainty analysis or not.
-- dropout: float between 0 and 1, dropout rate, 
+- dropout: float between 0 and 1, dropout rate, a larger value representing deactivating more pixels in feature maps.
+- dropout_state: tuple of bools, determining which dropout pairs to be activated. For example, `(False, False, True)` means deactivating the first and second dropout pairs and activating the third pair.
+- num_runs_bayes: int, number of runs during inference time when enabling dropout to generate uncertainty maps.
+
+
 
 ### Cross-stitch Network for FAF image segmentation (Multi-task learning)
 `mtl_model.py`: adapted cross-stitch network accepting two different image sources as input.<br>
