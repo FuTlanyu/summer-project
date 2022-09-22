@@ -1,4 +1,3 @@
-from cProfile import label
 import os
 import subprocess
 import random
@@ -31,26 +30,26 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc, accuracy_score, f1
 from torchsummary import summary
 
 ### AF SLO CLASSIFICATION ###
-CLA_DATA_OLD_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\SLO_AF_classifier\Oxford'
+CLA_DATA_OLD_PATH = r""
 # allocate to the new directory
-CLA_DATA_NEW_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\SLO_AF_classifier\data_new'
-CLA_MODEL_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\SLO_AF_class\code\classifier'
-CLA_H5_FILE_PATH = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\SLO_AF_classifier\hdf5'
+CLA_DATA_NEW_PATH = r""
+CLA_MODEL_PATH = r""
+CLA_H5_FILE_PATH = r""
 
 
 ### AF SEGMENTATION ###
-SEG_DATA_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\region_of_interest\data_raw"
+SEG_DATA_PATH = r""
 RPGR_PATH = join(SEG_DATA_PATH, 'RPGR')
 USH_PATH = join(SEG_DATA_PATH, 'USH')
 
-SEG_H5_FILE_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\Data\region_of_interest\hdf5"
-SEG_MODEL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\code\model\local"
-SEG_VISUAL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\code\visual"
+SEG_H5_FILE_PATH = r""
+SEG_MODEL_PATH = r""
+SEG_VISUAL_PATH = r""
 
 
 ### AF SLO MTL ###
-MTL_MODEL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\MTL\model"
-MTL_VISUAL_PATH = r"C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\MTL\visual"
+MTL_MODEL_PATH = r""
+MTL_VISUAL_PATH = r""
 
 NORM_SIZE_CLA = 256
 
@@ -62,14 +61,6 @@ def data_extract(indices, x_all, y_all):
         ys.append(y_all[index])
     
     return xs, ys
-
-# def data_split(indice, image_all, mask_all):
-#     imgs = []
-#     masks = []
-#     for id in indice:
-#         imgs.append(image_all[id])
-#         masks.append(mask_all[id])
-#     return imgs, masks
 
 
 def stat_compute_log(stat_list, str_type, folds=5):
@@ -83,12 +74,9 @@ def stat_compute_log(stat_list, str_type, folds=5):
     return stat_avg, stat_std
 
 
-
-
 '''
 AF Segmentation helper functions
 '''
-
 # inputs(1,3,768,768) outputs(1,3,768,768)
 def patch_infer_output(model, inputs, norm_size, device):
     stride = 128
@@ -126,8 +114,13 @@ def clahe_apply(image):
     return img_clahe
 
 
-
 def post_process(pred_mask, norm_size):
+    # test
+    # plt.imshow(pred_mask, cmap='gray')
+    # plt.show()
+    if torch.is_tensor(pred_mask):
+        pred_mask = pred_mask.cpu().detach().numpy()
+
     labeled_img = label(pred_mask, connectivity=2) 
     regions = regionprops(labeled_img) # not include background
     num_region = len(regions)
@@ -207,7 +200,6 @@ def load_imgs_seg(data_paths, data_type, norm_size, clahe_bool):
     return np.array(images)
 
 
-
 def load_imgs_cla(img_paths):
     """Crop/downsample and load image data into an array of images 
 
@@ -252,7 +244,6 @@ def image_restore_seg(img, size_origin):
     return img
 
 
-
 def create_h5_train_seg(imgs, masks, type, norm_size, clahe):
     """Create the hdf5 file for each subset containing images and masks
 
@@ -295,16 +286,6 @@ def create_h5_test_seg(imgs, masks, type, norm_size, clahe, fid=None):
             mask_name = os.path.split(mask)[-1].split('.')[0]
             assert img_name == mask_name, "image and mask don't match"
 
-            # test
-            # if img_name == '1564100_OD_2016':
-            #     print(img_name)
-            #     xxx = cv2.imread(mask)
-            #     _, xxx = cv2.threshold(xxx, 127, 255, cv2.THRESH_BINARY)
-            #     xxx = xxx//255*255
-                
-            #     cv2.imshow('xxx', xxx)
-            #     print()
-
             mask_origin = cv2.imread(mask)
             _, mask_origin = cv2.threshold(mask_origin, 127, 255, cv2.THRESH_BINARY)
             mask_origin = mask_origin//255
@@ -313,9 +294,6 @@ def create_h5_test_seg(imgs, masks, type, norm_size, clahe, fid=None):
         
             f.create_dataset(name=img_name, data=np.array([img_trans, mask_trans]))
             f.create_dataset(name=img_name+'_origin', data=np.array(mask_origin, dtype='uint8'))
-
-
-
 
  
 def seg_visual(pred_mask_restore, var_map, miou_restore, img_name, fig_name, model_type):
@@ -370,16 +348,6 @@ def seg_visual(pred_mask_restore, var_map, miou_restore, img_name, fig_name, mod
     else:
         plt.savefig(join(SEG_VISUAL_PATH, fig_name))
     plt.close()
-
-    # # test
-    # save_dir_path = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\visual_demo'
-  
-    # shutil.copy(img_path, save_dir_path) 
-    # if var_map is not None:
-    #     cv2.normalize(var_map, var_map, 0, 255, cv2.NORM_MINMAX)
-    #     var_map = np.repeat(var_map[:, :, np.newaxis], 3, axis=2)
-    #     cv2.imwrite(join(save_dir_path, img_name+'_probmap.png'), var_map)
-
 
 
 # All images are of size (256, 256, 3)
@@ -441,19 +409,11 @@ def seg_visual_overlap(norm_size, gt_mask, pred_mask, var_map, img_name, fig_nam
     pred_contours, _ = cv2.findContours(pred_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
 
     cv2.drawContours(image, gt_contours, -1, (0,255,0), thickness=1, lineType=cv2.LINE_AA)
-    # # test
-    # if img_name == '1564100_OD_2016':
-    #     cv2.imshow('gtmask', image)
-
     cv2.drawContours(image, pred_contours, -1, (0,0,255), thickness=1, lineType=cv2.LINE_AA)
     if model_type == 'mtl':
         cv2.imwrite(join(MTL_VISUAL_PATH, 'overlap_' + fig_name), image)
     else:
         cv2.imwrite(join(SEG_VISUAL_PATH, 'overlap_' + fig_name), image)
-
-    # # test
-    # save_dir_path = r'C:\Users\Fu Tianyu\Documents\UCL\CSML\Final Project\CSML_Summer2022\AF_Seg\visual_demo'
-    # cv2.imwrite(join(save_dir_path, img_name+'_pred.png'), image)
 
 
 def mIoU_score(pred, target, num_classes=2):
@@ -557,22 +517,6 @@ class MTLLoss(nn.Module):
 '''
 AF/SLO Classification helper functions
 '''
-
-
-# def load_img(img_path):
-
-#     img = cv2.imread(img_path)
-#     # crop and resize image to the same size
-#     NORM_SIZE = 768
-#     x, y, _ = img.shape
-#     if x != y:
-#         length = min(x, y)
-#         img = img[:length, :length]
-#     if img.shape[0] != NORM_SIZE:
-#         img = cv2.resize(img, (NORM_SIZE, NORM_SIZE))
-    
-#     return np.array(img)
-
 def display_imgs_cla(imgs):
     num = 10
     fig, axs = plt.subplots(1, num)
