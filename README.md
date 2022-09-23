@@ -26,6 +26,8 @@
 An optimal model with the Dice-BCE loss, Bayesian SegNet with a dropout rate of 0.2 on the third pair, image size of 512, using flipping and CLAHE with clip limit rate of 1.0, a fixed threshold of 0.002 with post-processing reached an test mIoU of 0.8709 ± 0.0261. The comparision of different models is shown in the table below.
 ![model_results](https://user-images.githubusercontent.com/36615950/191891610-937e7d5f-6089-4882-8902-1ff9dd066bd7.png)
 
+Some predicted results under the optimal settings are illustrated below. The green contour is the ground truth and the red contour is the predicted mask. The heatmap represents the uncertainty of the prediction. 
+![opt_vis](https://user-images.githubusercontent.com/36615950/191891915-3ede4dc2-e4c3-4339-8820-792e24732ea0.png)
 
 
 ### Cross-stitch Network for FAF image segmentation (Multi-task learning)
