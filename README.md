@@ -23,6 +23,9 @@
 - `dropout_state`: tuple of bools, determining which dropout pairs to be activated. For example, `(False, False, True)` means deactivating the first and second dropout pairs and activating the third pair.
 - `num_runs_bayes`: int, number of runs during inference time when enabling dropout to generate uncertainty maps.
 
+An optimal model with the Dice-BCE loss, Bayesian SegNet with a dropout rate of 0.2 on the third pair, image size of 512, using flipping and CLAHE with clip limit rate of 1.0, a fixed threshold of 0.002 with post-processing reached an test mIoU of 0.8709 ± 0.0261. The comparision of different models is shown in the table below.
+![model_results](https://user-images.githubusercontent.com/36615950/191891610-937e7d5f-6089-4882-8902-1ff9dd066bd7.png)
+
 
 
 ### Cross-stitch Network for FAF image segmentation (Multi-task learning)
